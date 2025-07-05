@@ -1,0 +1,560 @@
+// backend/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL") // Se configurará en un archivo .env
+}
+
+// Modelo User: Representa a cualquier usuario del sistema (admin, juez, participante)
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String?
+  password     String    // Se almacenará hasheada (nunca en texto plano)
+  role         Role      @default(PARTICIPANT) // Rol principal del usuario
+  
+  // Relaciones opcionales 1:1 con perfiles específicos de rol
+  participant  Participant?
+  judge        Judge?
+  adminProfile AdminProfile?
+  
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Enum Role: Define los tipos de roles de usuario
+enum Role {
+  SUPER_ADMIN // Control total del sistema (organizador principal)
+  ADMIN       // Administradores delegados con permisos configurables
+  JUDGE
+  PARTICIPANT
+}
+
+// Modelo AdminProfile: Perfil extendido para usuarios con rol ADMIN o SUPER_ADMIN
+model AdminProfile {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id])
+
+  // Permisos globales flexibles (JSON) - para evitar un monstruo monolítico
+  // Backend: Interpreta este JSON para autorizar acciones globales (ej. crear competiciones).
+  // Frontend: Proporciona una UI dinámica para configurar estos permisos sin cambios de esquema.
+  globalPermissions Json? 
+
+  // Relación con los permisos por competición
+  // Backend: Utiliza esta relación para autorizar acciones dentro de competiciones específicas.
+  // Frontend: UI para asignar administradores a competiciones y configurar sus permisos.
+  competitionPermissions AdminCompetitionPermission[]
+  
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Modelo AdminCompetitionPermission: Permisos de administrador por competición (granularidad)
+model AdminCompetitionPermission {
+  adminProfileId String
+  adminProfile   AdminProfile @relation(fields: [adminProfileId], references: [id])
+  
+  competitionId  String
+  competition    Competition @relation(fields: [competitionId], references: [id])
+  
+  // Permisos específicos para este administrador en esta competición
+  // Backend: Verifica estos booleanos para autorizar acciones.
+  // Frontend: UI para activar/desactivar estos permisos.
+  canManageParticipants Boolean @default(false)
+  canManageJudges       Boolean @default(false)
+  canManageRubrics      Boolean @default(false)
+  canManageLeaderboards Boolean @default(false)
+  canManageSettings     Boolean @default(false) // Para configuraciones generales de la competición
+  // Se pueden añadir más permisos granulares por competición
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@id([adminProfileId, competitionId]) // Clave primaria compuesta
+}
+
+// Modelo Participant: Representa a un participante en una competición
+// Responsabilidad: Backend gestiona CRUD. Frontend gestiona UI de participantes.
+model Participant {
+  id           String    @id @default(cuid())
+  
+  // Relación opcional 1:1 con User (permite participantes no registrados)
+  // Backend: Maneja la vinculación/desvinculación.
+  // Frontend: UI para añadir participantes (con/sin usuario), y vincular.
+  userId       String?   @unique
+  user         User?     @relation(fields: [userId], references: [id])
+  
+  name         String    // Nombre del participante/equipo (obligatorio)
+  type         ParticipantType @default(INDIVIDUAL) // Tipo de participante (individual/grupo)
+  teamName     String?   // Nombre del equipo (si es GROUP)
+  teamMembers  Json?     // Nombres de los miembros del equipo (JSON flexible)
+  approved     Boolean   @default(false) // Si el administrador ha aprobado su participación
+  
+  description  String?
+  portfolioUrl String?
+  profilePictureUrl String?
+  
+  // Datos personalizados definidos por el administrador (flexible)
+  // Backend: Almacena y recupera este JSON.
+  // Frontend: UI dinámica para que el administrador defina y edite propiedades personalizadas.
+  metadata     Json?     
+
+  // Relaciones
+  categories   Category[] @relation("ParticipantCategories") // Categorías a las que pertenece
+  assignments  JudgeAssignment[] // Asignaciones a jueces
+  scores       Score[] // Puntuaciones recibidas
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Enum ParticipantType: Define si el participante es individual o grupal
+// Responsabilidad: Backend para validación. Frontend para UI de selección.
+enum ParticipantType {
+  INDIVIDUAL
+  GROUP
+}
+
+// Modelo Judge: Representa a un juez en una competición
+// Responsabilidad: Backend gestiona CRUD y generación de tokens. Frontend gestiona UI de jueces.
+model Judge {
+  id           String    @id @default(cuid())
+  
+  name         String    // Nombre del juez (obligatorio, para identificación)
+  token        String?   @unique // Token para acceso vía QR/link (para jueces esporádicos)
+  
+  // Relación opcional 1:1 con User (para jueces registrados)
+  // Backend: Maneja la vinculación/desvinculación.
+  // Frontend: UI para añadir jueces (con/sin usuario), y vincular.
+  userId       String?   @unique
+  user         User?     @relation(fields: [userId], references: [id])
+  
+  bio          String?
+  profilePictureUrl String?
+  
+  // Datos personalizados definidos por el administrador (flexible)
+  // Backend: Almacena y recupera este JSON.
+  // Frontend: UI dinámica para que el administrador defina y edite propiedades personalizadas.
+  metadata     Json?     
+
+  // Relaciones
+  assignments  JudgeAssignment[] // Asignaciones a participantes
+  voterProfile Voter? // Perfil de votante asociado (1:1)
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Modelo Voter: Abstracción para cualquier entidad que emite un voto (juez o público)
+// Responsabilidad: Backend para atribuir scores y gestionar la identidad del votante. Frontend para UI de votación.
+model Voter {
+  id           String    @id @default(cuid())
+  type         VoterType // Tipo de votante (JUDGE o PUBLIC)
+  
+  // Relación opcional 1:1 con Judge (si el votante es un juez)
+  // Backend: Resuelve la identidad del juez.
+  // Frontend: No interactúa directamente, es una abstracción interna.
+  judgeId      String?   @unique
+  judge        Judge?    @relation(fields: [judgeId], references: [id])
+
+  // Identificador para votantes públicos (IP, ID de sesión, etc.)
+  // Backend: Almacena y valida este identificador.
+  // Frontend: Envía este identificador al backend al votar.
+  publicIdentifier String? 
+  
+  displayName  String?   // Nombre o identificador para mostrar en el UI
+  
+  scores       Score[]   // Puntuaciones emitidas por este votante
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Enum VoterType: Define si el votante es un juez o del público
+// Responsabilidad: Backend para lógica de votación. Frontend para UI de votación.
+enum VoterType {
+  JUDGE
+  PUBLIC
+}
+
+// -----------------------------------------------------------------------------
+// Modelos de Categorías y Rúbricas
+// -----------------------------------------------------------------------------
+
+// Modelo Category: Representa una categoría de competición (ej. "Diseño Web", "Backend")
+// Responsabilidad: Backend gestiona CRUD. Frontend gestiona UI de categorías.
+model Category {
+  id           String    @id @default(cuid())
+  name         String    @unique // El nombre de la categoría es único globalmente
+  description  String?
+  
+  // Jerarquía de categorías (self-referencing para subcategorías)
+  // Backend: Permite consultas jerárquicas.
+  // Frontend: UI para crear/gestionar categorías anidadas.
+  parentId     String?
+  parent       Category? @relation("Subcategories", fields: [parentId], references: [id])
+  subcategories Category[] @relation("Subcategories")
+  
+  // Relación de muchos a muchos con Competition (a través de CompetitionCategory)
+  // Backend: Gestiona la asignación de categorías a competiciones.
+  // Frontend: UI para asignar categorías a una competición.
+  competitions CompetitionCategory[]
+
+  // Relación de muchos a muchos con Participant
+  // Backend: Gestiona la asignación de participantes a categorías.
+  // Frontend: UI para asignar participantes a categorías.
+  participants Participant[] @relation("ParticipantCategories")
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Modelo CompetitionCategory: Tabla intermedia para la relación M:N entre Competition y Category
+// Responsabilidad: Backend para la integridad de la relación. Frontend no interactúa directamente.
+model CompetitionCategory {
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id])
+
+  categoryId    String
+  category      Category    @relation(fields: [categoryId], references: [id])
+
+  @@id([competitionId, categoryId]) // Clave primaria compuesta
+}
+
+// Modelo Rubric: Define una rúbrica de evaluación
+// Responsabilidad: Backend gestiona CRUD. Frontend gestiona UI de rúbricas.
+model Rubric {
+  id           String    @id @default(cuid())
+  name         String
+  description  String?
+  
+  criteria     Criterion[] // Criterios de evaluación de esta rúbrica
+  competitionId String
+  competition  Competition @relation(fields: [competitionId], references: [id]) // Rúbrica pertenece a una competición
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Modelo Criterion: Define un criterio específico dentro de una rúbrica
+// Responsabilidad: Backend para almacenar y usar en cálculos. Frontend para UI de criterios.
+model Criterion {
+  id           String    @id @default(cuid())
+  name         String
+  description  String?
+  maxScore     Int       @default(10) // Puntuación máxima para este criterio
+  
+  weight         Float     @default(1.0) // Ponderación del criterio en el cálculo final
+  
+  // Mapeo de valores cualitativos a numéricos (ej. {"A": 10, "B": 8})
+  // Backend: Interpreta este JSON para convertir valores cualitativos a numéricos para el cálculo.
+  // Frontend: UI para que el administrador defina este mapeo.
+  scoreMapping   Json?     
+  
+  rubricId     String
+  rubric       Rubric    @relation(fields: [rubricId], references: [id])
+  
+  scores       Score[] // Puntuaciones dadas para este criterio
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// -----------------------------------------------------------------------------
+// Modelos de Puntuación y Asignación
+// -----------------------------------------------------------------------------
+
+// Modelo Score: Representa una puntuación individual dada por un votante a un participante en un criterio
+// Responsabilidad: Backend gestiona creación/actualización y cálculos. Frontend gestiona UI de votación y display de scores.
+model Score {
+  id           String    @id @default(cuid())
+  value        Float     // Valor numérico de la puntuación (para ranking) - CRÍTICO: Float para precisión
+  qualitativeValue String? // Valor cualitativo/descriptivo (opcional, para display)
+  
+  participantId String
+  participant  Participant @relation(fields: [participantId], references: [id])
+  
+  criterionId  String
+  criterion    Criterion   @relation(fields: [criterionId], references: [id])
+  
+  voterId      String
+  voter        Voter     @relation(fields: [voterId], references: [id]) // Votante que emitió la puntuación
+  
+  createdAt    DateTime  @default(now())
+
+  // Restricción de unicidad: un votante solo puede puntuar un criterio para un participante una vez
+  @@unique([participantId, criterionId, voterId])
+}
+
+// Enum VoterType: Define si el votante es un juez o del público
+// Responsabilidad: Backend para lógica de votación. Frontend para UI de votación.
+enum VoterType {
+  JUDGE
+  PUBLIC
+}
+
+// Modelo JudgeAssignment: Asigna un juez a un participante (relación M:N)
+// Responsabilidad: Backend gestiona asignaciones. Frontend gestiona UI de asignación de jueces.
+model JudgeAssignment {
+  judgeId      String
+  judge        Judge     @relation(fields: [judgeId], references: [id])
+  
+  participantId String
+  participant  Participant @relation(fields: [participantId], references: [id])
+
+  @@id([judgeId, participantId]) // Clave primaria compuesta
+}
+
+// -----------------------------------------------------------------------------
+// Modelos de Competición y Configuración Dinámica
+// -----------------------------------------------------------------------------
+
+// Modelo Competition: Define una competición o evento
+// Responsabilidad: Backend gestiona el estado y la lógica principal. Frontend gestiona UI de competición.
+model Competition {
+  id             String    @id @default(cuid())
+  name           String
+  description    String?
+  
+  // Configuración flexible de la competición (JSON)
+  // Backend: Interpreta este JSON para la lógica de la competición (fechas, votación, scoring, etc.)
+  // Frontend: UI dinámica para que el administrador configure la competición.
+  config         Json?
+
+  templateId         String? // Opcional: la competición puede basarse en una plantilla
+  template           CompetitionTemplate? @relation(fields: [templateId], references: [id])
+
+  // Relaciones con configuraciones dinámicas
+  rubrics        Rubric[]
+  leaderboardViews CompetitionReport[] // CAMBIO: Renombrado a CompetitionReport
+  categories     CompetitionCategory[] // Relación de muchos a muchos con Category
+  phases         CompetitionPhase[] // Fases de la competición
+  integrationConfigs IntegrationConfig[] // Configuraciones de integración externa
+  automationRules AutomationRule[] // Reglas de automatización
+  
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+// Modelo CompetitionPhase: Define una fase o etapa dentro de una competición
+// Responsabilidad: Backend gestiona el estado de la fase. Frontend gestiona UI de fases y su progreso.
+model CompetitionPhase {
+  id            String    @id @default(cuid())
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id])
+  
+  name          String    // Ej: "Fase de Inscripción", "Evaluación Jueces"
+  description   String?
+  order         Int       // Orden de las fases
+  
+  // Configuración flexible de la fase (JSON)
+  // Backend: Interpreta este JSON para la lógica específica de la fase (fechas, si se puede votar, etc.)
+  // Frontend: UI dinámica para que el administrador configure la fase.
+  config        Json?
+  
+  createdAt     DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Modelo CompetitionTemplate: Permite crear plantillas reutilizables para competiciones
+// Responsabilidad: Backend gestiona CRUD. Frontend gestiona UI de creación/selección de plantillas.
+model CompetitionTemplate {
+  id                 String          @id @default(cuid())
+  name               String          @unique
+  description        String?
+  
+  // Configuración flexible de la plantilla (JSON)
+  // Backend: Interpreta este JSON para aplicar valores por defecto al crear una competición.
+  // Frontend: UI dinámica para que el administrador configure la plantilla.
+  config             Json?
+
+  // Relaciones: Una plantilla puede tener rúbricas y categorías por defecto
+  defaultRubrics     RubricTemplate[]
+  defaultCategories  CategoryTemplate[]
+
+  competitions       Competition[] // Competiciones que usan esta plantilla
+
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+}
+
+// Modelo RubricTemplate: Rúbricas predefinidas para plantillas de competición
+// Responsabilidad: Backend gestiona. Frontend gestiona UI de plantillas de rúbricas.
+model RubricTemplate {
+  id                 String          @id @default(cuid())
+  name               String
+  description        String?
+  
+  templateId         String
+  template           CompetitionTemplate @relation(fields: [templateId], references: [id])
+
+  criteria           CriterionTemplate[]
+  
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+}
+
+// Modelo CriterionTemplate: Criterios predefinidos para rúbricas de plantillas
+// Responsabilidad: Backend gestiona. Frontend gestiona UI de plantillas de criterios.
+model CriterionTemplate {
+  id                 String          @id @default(cuid())
+  name               String
+  description        String?
+  maxScore           Int             @default(10)
+  weight             Float           @default(1.0)
+  
+  rubricTemplateId   String
+  rubricTemplate     RubricTemplate @relation(fields: [rubricTemplateId], references: [id])
+
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+}
+
+// Modelo CategoryTemplate: Categorías predefinidas para plantillas de competición
+// Responsabilidad: Backend gestiona. Frontend gestiona UI de plantillas de categorías.
+model CategoryTemplate {
+  id                 String          @id @default(cuid())
+  name               String
+  description        String?
+  
+  templateId         String
+  template           CompetitionTemplate @relation(fields: [templateId], references: [id])
+
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+}
+
+// Modelo IntegrationConfig: Configuración para integrar con fuentes de datos externas
+// Responsabilidad: Backend interpreta 'config' para realizar integraciones. Frontend gestiona UI de configuración de integraciones.
+model IntegrationConfig {
+  id                 String          @id @default(cuid())
+  name               String          // Nombre de la configuración (ej: "API de Juego X")
+  competitionId      String
+  competition        Competition     @relation(fields: [competitionId], references: [id])
+  
+  type               String          // Tipo de integración (ej: "API_POLL", "WEBHOOK_RECEIVE", "FILE_UPLOAD")
+  
+  config             Json            // Configuración específica de la integración (URL, credenciales, mapeo)
+  dataType           String          // Qué tipo de datos se esperan (ej: "SCORE_UPDATE", "PARTICIPANT_LIST")
+
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+}
+
+// Modelo AutomationRule: Reglas para automatizar acciones en la competición
+// Responsabilidad: Backend ejecuta las reglas. Frontend gestiona UI de creación/gestión de reglas.
+model AutomationRule {
+  id                 String          @id @default(cuid())
+  name               String          // Nombre de la regla (ej: "Cerrar Votación al Final del Día")
+  competitionId      String
+  competition        Competition     @relation(fields: [competitionId], references: [id])
+  
+  triggerType        String          // Tipo de disparador (ej: "TIME_BASED", "EXTERNAL_EVENT", "SCORE_THRESHOLD")
+  triggerConfig      Json            // Configuración específica del disparador
+  
+  actionType         String          // Tipo de acción (ej: "OPEN_VOTING", "CLOSE_VOTING", "UPDATE_SCORES")
+  actionConfig       Json?           // Configuración específica de la acción
+
+  isEnabled          Boolean         @default(true)
+
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+}
+
+// -----------------------------------------------------------------------------
+// Modelos de Reportes y Visualización (antes Leaderboard)
+// -----------------------------------------------------------------------------
+
+// Modelo CompetitionReport: Define una configuración para un reporte/visualización de datos de competición
+// Responsabilidad: Backend construye la consulta de datos. Frontend solicita y muestra el reporte.
+model CompetitionReport {
+  id            String   @id @default(cuid())
+  name          String   // Ej: "Top 5 - Voto del Público (Categoría Rock)", "Tabla de Grupos Mundial"
+  competitionId String
+  competition   Competition @relation(fields: [competitionId], references: [id])
+
+  // --- Filtros de Datos ---
+  // Backend: Aplica estos filtros en la consulta a la DB.
+  // Frontend: UI para que el administrador configure los filtros.
+  categories    String[] // IDs de las categorías a incluir
+  voterTypes    VoterType[] // JUDGE, PUBLIC o ambos
+  judges        String[] // IDs de los jueces a incluir
+  limit         Int?     // Ej: Mostrar solo el Top 10
+  
+  // Relación con la opción de ordenación dinámica
+  // Backend: Utiliza esta opción para ordenar los resultados.
+  // Frontend: UI para que el administrador seleccione la opción de ordenación.
+  sortOptionId  String?
+  sortOption    ReportSortOption? @relation(fields: [sortOptionId], references: [id]) // CAMBIO: Renombrado
+  
+  // Relación 1:N con la configuración de visualización (modularidad y reusabilidad)
+  // Backend: Almacena el ID de la configuración de display.
+  // Frontend: UI para que el administrador seleccione la configuración de display.
+  displayConfigId String? 
+  displayConfig   ReportDisplayConfig? @relation(fields: [displayConfigId], references: [id]) // CAMBIO: Renombrado
+  
+  createdAt     DateTime @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Modelo ReportSortOption: Define una opción de ordenación dinámica para reportes
+// Responsabilidad: Backend interpreta 'field' y 'direction' para ordenar. Frontend gestiona UI de opciones de ordenación.
+model ReportSortOption {
+  id          String        @id @default(cuid())
+  name        String        @unique // Ej: "Puntuación Total (Mayor a Menor)", "Goles a Favor (Mayor a Menor)"
+  field       String        // El campo real de la base de datos o clave para un campo calculado
+  direction   String        // ASC o DESC
+  description String?       // Descripción opcional
+  
+  reports     CompetitionReport[] @relation("ReportSortOptionReports") // CAMBIO: Relación con CompetitionReport
+  
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+// Modelo ReportDisplayConfig: Configuración modular para la visualización de reportes
+// Responsabilidad: Backend almacena 'displayOptions' JSON. Frontend interpreta este JSON para renderizar la UI.
+model ReportDisplayConfig {
+  id                   String    @id @default(cuid())
+  name                 String    @unique // Ej: "Tabla de Leaderboard", "Bracket de Torneo", "Gráfico de Barras"
+  description          String?
+  
+  // Opciones de visualización flexibles (JSON) - para evitar un monstruo monolítico
+  // Backend: Almacena este JSON de forma agnóstica.
+  // Frontend: Interpreta este JSON para decidir qué mostrar, cómo animar, qué layout usar, etc.
+  displayOptions       Json? 
+
+  reports              CompetitionReport[] @relation("ReportDisplayConfigReports") // CAMBIO: Relación con CompetitionReport
+
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+// -----------------------------------------------------------------------------
+// Modelo de Auditoría
+// -----------------------------------------------------------------------------
+
+// Modelo AuditLog: Registro de auditoría para acciones críticas del sistema
+// Responsabilidad: Backend registra acciones. Frontend (admin/soporte) consulta para trazabilidad.
+model AuditLog {
+  id            String    @id @default(cuid())
+  userId        String?   // El usuario que realizó la acción (si es un User registrado)
+  user          User?     @relation(fields: [userId], references: [id])
+  
+  actionType    String    // Ej: "COMPETITION_UPDATE", "PARTICIPANT_CREATED"
+  entityType    String    // Ej: "Competition", "Participant"
+  entityId      String    // ID de la entidad afectada
+  
+  oldValue      Json?     // Valor antes del cambio (opcional)
+  newValue      Json?     // Valor después del cambio (opcional)
+  
+  ipAddress     String?   // IP desde donde se realizó la acción
+  userAgent     String?   // User-Agent del cliente
+  
+  createdAt     DateTime  @default(now())
+}
